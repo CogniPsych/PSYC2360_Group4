@@ -430,7 +430,6 @@
             border-radius: 10px;
             max-height: 600px;
             overflow-y: auto;
-            text-align: left;
         }
 
         .admin-list h2 {
@@ -686,6 +685,27 @@
             margin-top: 15px;
         }
 
+        .firebase-status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 999;
+        }
+
+        .firebase-status.online {
+            background: #4caf50;
+            color: white;
+        }
+
+        .firebase-status.offline {
+            background: #f44336;
+            color: white;
+        }
+
         @media (max-width: 768px) {
             .results-columns {
                 grid-template-columns: 1fr;
@@ -741,10 +761,19 @@
                 margin-left: 0;
                 width: 100%;
             }
+
+            .firebase-status {
+                bottom: 10px;
+                right: 10px;
+                font-size: 11px;
+                padding: 8px 12px;
+            }
         }
     </style>
 </head>
 <body>
+    <div class="firebase-status" id="firebaseStatus">Connecting...</div>
+
     <div class="container">
         <h1>🧠 Word recall attention test</h1>
 
@@ -907,14 +936,35 @@
         let db = null;
         let firebaseReady = false;
 
-        try {
-            firebase.initializeApp(firebaseConfig);
-            db = firebase.database();
-            firebaseReady = true;
-            console.log('Firebase initialized successfully');
-        } catch (error) {
-            console.warn('Firebase initialization error:', error);
-            firebaseReady = false;
+        // Initialize Firebase with detailed error handling
+        function initializeFirebase() {
+            try {
+                firebase.initializeApp(firebaseConfig);
+                db = firebase.database();
+                firebaseReady = true;
+                console.log('✓ Firebase initialized successfully');
+                updateFirebaseStatus(true);
+                
+                // Enable offline persistence
+                db.goOffline();
+                db.goOnline();
+                
+            } catch (error) {
+                console.error('✗ Firebase initialization failed:', error);
+                firebaseReady = false;
+                updateFirebaseStatus(false);
+            }
+        }
+
+        function updateFirebaseStatus(online) {
+            const status = document.getElementById('firebaseStatus');
+            if (online) {
+                status.textContent = '🟢 Firebase Online';
+                status.className = 'firebase-status online';
+            } else {
+                status.textContent = '🔴 Firebase Offline';
+                status.className = 'firebase-status offline';
+            }
         }
 
         // Admin password
@@ -952,80 +1002,117 @@
             document.getElementById(screenId).classList.remove('hidden');
         }
 
-        // ============ STORAGE MANAGEMENT (Firebase Only) ============
+        // ============ FIREBASE DATA FUNCTIONS (CLOUD ONLY) ============
         async function getAllParticipantsData() {
             if (!firebaseReady || !db) {
-                console.error('Firebase is not ready');
+                console.error('Firebase not initialized');
                 return [];
             }
+
             try {
                 const snapshot = await db.ref('participants').once('value');
                 const data = snapshot.val();
-                return data ? Object.values(data) : [];
+                console.log('Data fetched from Firebase:', data);
+                return data ? Object.entries(data).map(([key, value]) => ({ ...value, id: key })) : [];
             } catch (error) {
-                console.error('Firebase read error:', error);
+                console.error('Error reading from Firebase:', error);
                 return [];
             }
         }
 
-        async function saveParticipantsData(data) {
+        async function saveTestResult(name, testResponses) {
             if (!firebaseReady || !db) {
-                console.error('Firebase is not ready for saving');
+                console.error('Firebase not ready. Cannot save test results.');
+                updateFirebaseStatus(false);
                 return false;
-            }
-            try {
-                // Save each participant with their ID as key
-                const updates = {};
-                for (let participant of data) {
-                    updates['participants/' + participant.id] = participant;
-                }
-                await db.ref().update(updates);
-                console.log('Data saved to Firebase successfully');
-                return true;
-            } catch (error) {
-                console.error('Firebase write error:', error);
-                return false;
-            }
-        }
-
-        async function addTestResult(name, responses) {
-            if (!firebaseReady || !db) {
-                console.error('Firebase not ready for saving test results');
-                return;
             }
 
             try {
-                const allData = await getAllParticipantsData();
-                let participantId = btoa(name.toLowerCase()).substring(0, 20);
-                const existingParticipant = allData.find(p => p.id === participantId);
-
+                // Generate unique participant ID from name
+                const participantId = btoa(name.toLowerCase()).substring(0, 20);
+                
+                // Create test result object
                 const testResult = {
                     timestamp: new Date().toISOString(),
-                    responses: responses
+                    responses: testResponses
                 };
 
-                if (existingParticipant) {
-                    if (!existingParticipant.tests) {
-                        existingParticipant.tests = [];
+                // Get existing participant data or create new
+                const participantRef = db.ref('participants/' + participantId);
+                const snapshot = await participantRef.once('value');
+                let participantData;
+
+                if (snapshot.exists()) {
+                    participantData = snapshot.val();
+                    if (!participantData.tests) {
+                        participantData.tests = [];
                     }
-                    existingParticipant.tests.push(testResult);
-                    existingParticipant.lastUpdated = new Date().toISOString();
+                    participantData.tests.push(testResult);
+                    participantData.lastUpdated = new Date().toISOString();
                 } else {
-                    allData.push({
+                    participantData = {
                         id: participantId,
                         name: name,
                         tests: [testResult],
                         firstAdded: new Date().toISOString(),
                         lastUpdated: new Date().toISOString()
-                    });
+                    };
                 }
 
-                // Direct write to Firebase
-                const participantData = existingParticipant || allData[allData.length - 1];
-                await db.ref('participants/' + participantData.id).set(participantData);
-                console.log('Test result saved to Firebase for:', name);
+                // Write to Firebase
+                await participantRef.set(participantData);
+                console.log('✓ Test result saved to Firebase for:', name);
+                return true;
+
             } catch (error) {
-                console.error('Error saving test result:', error);
+                console.error('✗ Error saving test result to Firebase:', error);
+                return false;
+            }
+        }
+
+        async function deleteParticipantData(participantId) {
+            if (!firebaseReady || !db) {
+                console.error('Firebase not ready');
+                return false;
+            }
+
+            try {
+                await db.ref('participants/' + participantId).remove();
+                console.log('Participant deleted:', participantId);
+                return true;
+            } catch (error) {
+                console.error('Error deleting participant:', error);
+                return false;
+            }
+        }
+
+        async function deleteTestResult(participantId, testIndex) {
+            if (!firebaseReady || !db) {
+                console.error('Firebase not ready');
+                return false;
+            }
+
+            try {
+                const participantRef = db.ref('participants/' + participantId);
+                const snapshot = await participantRef.once('value');
+                const participantData = snapshot.val();
+
+                if (participantData && participantData.tests) {
+                    participantData.tests.splice(testIndex, 1);
+                    participantData.lastUpdated = new Date().toISOString();
+
+                    if (participantData.tests.length === 0) {
+                        // Delete entire participant if no tests remain
+                        await participantRef.remove();
+                    } else {
+                        await participantRef.set(participantData);
+                    }
+                    return true;
+                }
+                return false;
+            } catch (error) {
+                console.error('Error deleting test:', error);
+                return false;
             }
         }
 
@@ -1051,16 +1138,16 @@
 
         async function deleteParticipant(index) {
             const allData = await getAllParticipantsData();
-            const participantName = allData[index].name;
-            const participantId = allData[index].id;
+            if (index >= allData.length) return;
+
+            const participant = allData[index];
+            const participantName = participant.name;
+            const participantId = participant.id;
             
             showDeleteModal(
                 `Are you sure you want to delete all results for "${participantName}"? This action cannot be undone.`,
                 async function() {
-                    allData.splice(index, 1);
-                    if (firebaseReady && db) {
-                        await db.ref('participants/' + participantId).remove();
-                    }
+                    await deleteParticipantData(participantId);
                     loadParticipantsList();
                 }
             );
@@ -1074,20 +1161,11 @@
             showDeleteModal(
                 `Are you sure you want to delete this test result from "${participant.name}" (${testDate})? This action cannot be undone.`,
                 async function() {
-                    participant.tests.splice(testIndex, 1);
-                    participant.lastUpdated = new Date().toISOString();
-                    
-                    if (participant.tests.length === 0) {
-                        allData.splice(currentParticipantIndex, 1);
-                        if (firebaseReady && db) {
-                            await db.ref('participants/' + participant.id).remove();
-                        }
-                        loadParticipantsList();
-                    } else {
-                        if (firebaseReady && db) {
-                            await db.ref('participants/' + participant.id).set(participant);
-                        }
+                    await deleteTestResult(participant.id, testIndex);
+                    if (participant.tests.length > 1) {
                         viewParticipantResults(currentParticipantIndex);
+                    } else {
+                        loadParticipantsList();
                     }
                 }
             );
@@ -1112,7 +1190,7 @@
         }
 
         async function loadParticipantsList() {
-            document.getElementById('passwordErrorMessage').innerHTML = '<div class="loading-message">Loading participants...</div>';
+            document.getElementById('passwordErrorMessage').innerHTML = '<div class="loading-message">Loading participants from Firebase...</div>';
             
             try {
                 const allData = await getAllParticipantsData();
@@ -1146,7 +1224,7 @@
                 document.getElementById('passwordErrorMessage').innerHTML = '';
             } catch (error) {
                 console.error('Error loading participants:', error);
-                document.getElementById('passwordErrorMessage').innerHTML = '<div class="error-message">Error loading data</div>';
+                document.getElementById('passwordErrorMessage').innerHTML = '<div class="error-message">Error loading data from Firebase</div>';
             }
         }
 
@@ -1211,12 +1289,12 @@
             const test = participant.tests[testIdx];
 
             const resultsDiv = document.getElementById('testResults');
-            const responses = test.responses;
+            const testResponses = test.responses;
 
             let oldCorrect = 0, oldIncorrect = 0, newIncorrect = 0, newCorrect = 0;
             let oldWords = [], oldWrong = [], newWords = [], newWrong = [];
 
-            responses.forEach(response => {
+            testResponses.forEach(response => {
                 if (firstList.includes(response.word)) {
                     if (response.response === 'was-in') {
                         oldCorrect++;
@@ -1267,7 +1345,7 @@
             html += '</div></div>';
 
             let totalScore = oldCorrect + newCorrect;
-            html += '<div class="score-summary"><strong>Overall Score:</strong> <span class="score-number">' + totalScore + '/' + responses.length + '</span></div>';
+            html += '<div class="score-summary"><strong>Overall Score:</strong> <span class="score-number">' + totalScore + '/' + testResponses.length + '</span></div>';
 
             resultsDiv.innerHTML = html;
         }
@@ -1383,9 +1461,15 @@
         }
 
         async function showResults() {
-            document.getElementById('loadingMessage').textContent = 'Saving your results online...';
-            await addTestResult(userName, responses);
-            document.getElementById('loadingMessage').textContent = '';
+            document.getElementById('loadingMessage').textContent = 'Saving your results to the cloud...';
+            const saveSuccess = await saveTestResult(userName, responses);
+            
+            if (saveSuccess) {
+                document.getElementById('loadingMessage').textContent = '✓ Results saved successfully!';
+            } else {
+                document.getElementById('loadingMessage').textContent = '⚠️ Unable to save results - Firebase may be offline';
+            }
+            
             showScreen('completionScreen');
         }
 
@@ -1403,6 +1487,7 @@
 
         // Initialize app
         window.addEventListener('load', () => {
+            initializeFirebase();
             showScreen('roleScreen');
         });
     </script>
