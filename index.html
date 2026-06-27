@@ -913,7 +913,7 @@
             firebaseReady = true;
             console.log('Firebase initialized successfully');
         } catch (error) {
-            console.warn('Firebase not configured. Using localStorage fallback:', error);
+            console.warn('Firebase initialization error:', error);
             firebaseReady = false;
         }
 
@@ -952,66 +952,81 @@
             document.getElementById(screenId).classList.remove('hidden');
         }
 
-        // ============ STORAGE MANAGEMENT (Cloud + Fallback) ============
+        // ============ STORAGE MANAGEMENT (Firebase Only) ============
         async function getAllParticipantsData() {
-            if (firebaseReady) {
-                try {
-                    const snapshot = await db.ref('participants').once('value');
-                    const data = snapshot.val();
-                    return data ? Object.values(data) : [];
-                } catch (error) {
-                    console.error('Firebase read error, using localStorage:', error);
-                }
+            if (!firebaseReady || !db) {
+                console.error('Firebase is not ready');
+                return [];
             }
-            // Fallback to localStorage
-            return JSON.parse(localStorage.getItem('allParticipantsData') || '[]');
+            try {
+                const snapshot = await db.ref('participants').once('value');
+                const data = snapshot.val();
+                return data ? Object.values(data) : [];
+            } catch (error) {
+                console.error('Firebase read error:', error);
+                return [];
+            }
         }
 
         async function saveParticipantsData(data) {
-            if (firebaseReady) {
-                try {
-                    // Save to Firebase with participant ID as key
-                    for (let participant of data) {
-                        await db.ref('participants/' + participant.id).set(participant);
-                    }
-                    console.log('Data saved to Firebase');
-                } catch (error) {
-                    console.error('Firebase write error, using localStorage:', error);
-                    localStorage.setItem('allParticipantsData', JSON.stringify(data));
+            if (!firebaseReady || !db) {
+                console.error('Firebase is not ready for saving');
+                return false;
+            }
+            try {
+                // Save each participant with their ID as key
+                const updates = {};
+                for (let participant of data) {
+                    updates['participants/' + participant.id] = participant;
                 }
-            } else {
-                // Fallback to localStorage
-                localStorage.setItem('allParticipantsData', JSON.stringify(data));
+                await db.ref().update(updates);
+                console.log('Data saved to Firebase successfully');
+                return true;
+            } catch (error) {
+                console.error('Firebase write error:', error);
+                return false;
             }
         }
 
         async function addTestResult(name, responses) {
-            const allData = await getAllParticipantsData();
-            let participantId = btoa(name.toLowerCase()).substring(0, 20); // Create consistent ID
-            const existingParticipant = allData.find(p => p.id === participantId);
-
-            const testResult = {
-                timestamp: new Date().toISOString(),
-                responses: responses
-            };
-
-            if (existingParticipant) {
-                if (!existingParticipant.tests) {
-                    existingParticipant.tests = [];
-                }
-                existingParticipant.tests.push(testResult);
-                existingParticipant.lastUpdated = new Date().toISOString();
-            } else {
-                allData.push({
-                    id: participantId,
-                    name: name,
-                    tests: [testResult],
-                    firstAdded: new Date().toISOString(),
-                    lastUpdated: new Date().toISOString()
-                });
+            if (!firebaseReady || !db) {
+                console.error('Firebase not ready for saving test results');
+                return;
             }
 
-            await saveParticipantsData(allData);
+            try {
+                const allData = await getAllParticipantsData();
+                let participantId = btoa(name.toLowerCase()).substring(0, 20);
+                const existingParticipant = allData.find(p => p.id === participantId);
+
+                const testResult = {
+                    timestamp: new Date().toISOString(),
+                    responses: responses
+                };
+
+                if (existingParticipant) {
+                    if (!existingParticipant.tests) {
+                        existingParticipant.tests = [];
+                    }
+                    existingParticipant.tests.push(testResult);
+                    existingParticipant.lastUpdated = new Date().toISOString();
+                } else {
+                    allData.push({
+                        id: participantId,
+                        name: name,
+                        tests: [testResult],
+                        firstAdded: new Date().toISOString(),
+                        lastUpdated: new Date().toISOString()
+                    });
+                }
+
+                // Direct write to Firebase
+                const participantData = existingParticipant || allData[allData.length - 1];
+                await db.ref('participants/' + participantData.id).set(participantData);
+                console.log('Test result saved to Firebase for:', name);
+            } catch (error) {
+                console.error('Error saving test result:', error);
+            }
         }
 
         // ============ DELETE FUNCTIONS ============
@@ -1043,10 +1058,9 @@
                 `Are you sure you want to delete all results for "${participantName}"? This action cannot be undone.`,
                 async function() {
                     allData.splice(index, 1);
-                    if (firebaseReady) {
+                    if (firebaseReady && db) {
                         await db.ref('participants/' + participantId).remove();
                     }
-                    await saveParticipantsData(allData);
                     loadParticipantsList();
                 }
             );
@@ -1065,13 +1079,14 @@
                     
                     if (participant.tests.length === 0) {
                         allData.splice(currentParticipantIndex, 1);
-                        if (firebaseReady) {
+                        if (firebaseReady && db) {
                             await db.ref('participants/' + participant.id).remove();
                         }
-                        await saveParticipantsData(allData);
-                        backToAdminDashboard();
+                        loadParticipantsList();
                     } else {
-                        await saveParticipantsData(allData);
+                        if (firebaseReady && db) {
+                            await db.ref('participants/' + participant.id).set(participant);
+                        }
                         viewParticipantResults(currentParticipantIndex);
                     }
                 }
@@ -1368,7 +1383,7 @@
         }
 
         async function showResults() {
-            document.getElementById('loadingMessage').textContent = 'Saving your results...';
+            document.getElementById('loadingMessage').textContent = 'Saving your results online...';
             await addTestResult(userName, responses);
             document.getElementById('loadingMessage').textContent = '';
             showScreen('completionScreen');
